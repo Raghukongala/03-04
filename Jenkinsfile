@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    parameters {
-        choice(name: 'ACTION', choices: ['apply', 'destroy'], description: 'Choose Terraform Action')
-    }
-
     environment {
         AWS_REGION   = "ap-south-1"
         CLUSTER_NAME = "devops-ecs-cluster"
@@ -32,10 +28,7 @@ pipeline {
             }
         }
 
-        stage('Destroy Old Infrastructure (Before Apply)') {
-            when {
-                expression { params.ACTION == 'apply' }
-            }
+        stage('Destroy Old Infrastructure') {
             steps {
                 withCredentials([[
                     $class: 'AmazonWebServicesCredentialsBinding',
@@ -67,39 +60,24 @@ pipeline {
         }
 
         stage('Terraform Plan') {
-            when {
-                expression { params.ACTION == 'apply' }
-            }
             steps {
                 sh 'terraform plan -out=tfplan'
             }
         }
 
         stage('Terraform Apply') {
-            when {
-                expression { params.ACTION == 'apply' }
-            }
             steps {
                 sh 'terraform apply -auto-approve tfplan'
-            }
-        }
-
-        stage('Terraform Destroy') {
-            when {
-                expression { params.ACTION == 'destroy' }
-            }
-            steps {
-                sh 'terraform destroy -auto-approve'
             }
         }
     }
 
     post {
         success {
-            echo "🚀 Terraform ${params.ACTION} Successful"
+            echo "🚀 Terraform Apply Successful"
         }
         failure {
-            echo "❌ Terraform ${params.ACTION} Failed"
+            echo "❌ Terraform Apply Failed"
         }
     }
 }
