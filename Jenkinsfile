@@ -6,9 +6,10 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = "ap-south-1"
+        AWS_REGION   = "ap-south-1"
         CLUSTER_NAME = "devops-ecs-cluster"
         SERVICE_NAME = "devops-service"
+        ECR_REPO     = "ecs-devops-repo"
     }
 
     stages {
@@ -54,34 +55,45 @@ pipeline {
                 expression { params.ACTION == 'destroy' }
             }
             steps {
-                sh '''
-                echo "=== STEP 1: Scale down ECS service ==="
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+                    sh '''
+                    echo "=== STEP 1: Scale down ECS service ==="
 
-                aws ecs update-service \
-                  --cluster $CLUSTER_NAME \
-                  --service $SERVICE_NAME \
-                  --desired-count 0 || true
+                    aws ecs update-service \
+                      --cluster $CLUSTER_NAME \
+                      --service $SERVICE_NAME \
+                      --desired-count 0 || true
 
-                echo "Waiting for tasks to stop..."
-                sleep 60
+                    echo "Waiting for tasks to stop..."
+                    sleep 60
 
-                echo "=== STEP 2: Delete ECS service ==="
+                    echo "=== STEP 2: Delete ECS service ==="
 
-                aws ecs delete-service \
-                  --cluster $CLUSTER_NAME \
-                  --service $SERVICE_NAME \
-                  --force || true
+                    aws ecs delete-service \
+                      --cluster $CLUSTER_NAME \
+                      --service $SERVICE_NAME \
+                      --force || true
 
-                echo "Waiting for service to become inactive..."
+                    echo "Waiting for service to become inactive..."
 
-                aws ecs wait services-inactive \
-                  --cluster $CLUSTER_NAME \
-                  --services $SERVICE_NAME || true
+                    aws ecs wait services-inactive \
+                      --cluster $CLUSTER_NAME \
+                      --services $SERVICE_NAME || true
 
-                echo "=== STEP 3: Terraform destroy ==="
+                    echo "=== STEP 3: Delete ECR (force) ==="
 
-                terraform destroy -auto-approve
-                '''
+                    aws ecr delete-repository \
+                      --repository-name $ECR_REPO \
+                      --force || true
+
+                    echo "=== STEP 4: Terraform destroy ==="
+
+                    terraform destroy -auto-approve
+                    '''
+                }
             }
         }
     }
