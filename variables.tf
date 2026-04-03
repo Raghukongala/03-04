@@ -17,5 +17,5 @@ variable "ecs_min_capacity" {
 
 variable "ecs_max_capacity" {
   description = "Maximum number of ECS tasks"
-  default     = 2
+  default     = 10
 }
