@@ -1,13 +1,7 @@
-# ─────────────────────────────────────────────
-# ECS Cluster
-# ─────────────────────────────────────────────
 resource "aws_ecs_cluster" "cluster" {
   name = "devops-ecs-cluster"
 }
 
-# ─────────────────────────────────────────────
-# IAM Role for ECS Task Execution
-# ─────────────────────────────────────────────
 resource "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
 
@@ -30,9 +24,6 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ─────────────────────────────────────────────
-# ECS Task Definition
-# ─────────────────────────────────────────────
 resource "aws_ecs_task_definition" "task" {
   family                   = "devops-task"
   requires_compatibilities = ["FARGATE"]
@@ -59,12 +50,33 @@ resource "aws_ecs_task_definition" "task" {
   ])
 }
 
-# ─────────────────────────────────────────────
-# ECS Service  (wired to ALB target group)
-# Declared BEFORE ecs_sg so that on destroy,
-# Terraform tears down the service first (draining
-# all task ENIs), and only then deletes the SG.
-# ─────────────────────────────────────────────
+# ✅ Security Group FIRST (no depends_on)
+resource "aws_security_group" "ecs_sg" {
+  name        = "ecs-sg"
+  description = "Allow traffic from ALB to ECS tasks"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "App port from ALB"
+    from_port       = var.app_port
+    to_port         = var.app_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ecs-sg"
+  }
+}
+
+# ✅ ECS Service AFTER SG
 resource "aws_ecs_service" "service" {
   name            = "devops-service"
   cluster         = aws_ecs_cluster.cluster.id
@@ -89,38 +101,4 @@ resource "aws_ecs_service" "service" {
   }
 
   depends_on = [aws_lb_listener.http]
-}
-
-# ─────────────────────────────────────────────
-# Security Group – ECS Tasks
-# Declared AFTER the service block so the Terraform
-# destroy graph deletes the service (and drains all
-# task ENIs) before attempting to delete this SG.
-# This is the fix for: DependencyViolation on destroy.
-# ─────────────────────────────────────────────
-resource "aws_security_group" "ecs_sg" {
-  name        = "ecs-sg"
-  description = "Allow traffic from ALB to ECS tasks"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description     = "App port from ALB"
-    from_port       = var.app_port
-    to_port         = var.app_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  depends_on = [aws_ecs_service.service]
-
-  tags = {
-    Name = "ecs-sg"
-  }
 }
