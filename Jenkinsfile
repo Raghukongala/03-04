@@ -32,6 +32,40 @@ pipeline {
             }
         }
 
+        stage('Destroy Old Infrastructure (Before Apply)') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+                    sh '''
+                    echo "Destroying old infrastructure..."
+
+                    aws ecs update-service \
+                      --cluster $CLUSTER_NAME \
+                      --service $SERVICE_NAME \
+                      --desired-count 0 || true
+
+                    sleep 30
+
+                    aws ecs delete-service \
+                      --cluster $CLUSTER_NAME \
+                      --service $SERVICE_NAME \
+                      --force || true
+
+                    aws ecr delete-repository \
+                      --repository-name $ECR_REPO \
+                      --force || true
+
+                    terraform destroy -auto-approve || true
+                    '''
+                }
+            }
+        }
+
         stage('Terraform Plan') {
             when {
                 expression { params.ACTION == 'apply' }
@@ -55,45 +89,7 @@ pipeline {
                 expression { params.ACTION == 'destroy' }
             }
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-creds'
-                ]]) {
-                    sh '''
-                    echo "=== STEP 1: Scale down ECS service ==="
-
-                    aws ecs update-service \
-                      --cluster $CLUSTER_NAME \
-                      --service $SERVICE_NAME \
-                      --desired-count 0 || true
-
-                    echo "Waiting for tasks to stop..."
-                    sleep 60
-
-                    echo "=== STEP 2: Delete ECS service ==="
-
-                    aws ecs delete-service \
-                      --cluster $CLUSTER_NAME \
-                      --service $SERVICE_NAME \
-                      --force || true
-
-                    echo "Waiting for service to become inactive..."
-
-                    aws ecs wait services-inactive \
-                      --cluster $CLUSTER_NAME \
-                      --services $SERVICE_NAME || true
-
-                    echo "=== STEP 3: Delete ECR (force) ==="
-
-                    aws ecr delete-repository \
-                      --repository-name $ECR_REPO \
-                      --force || true
-
-                    echo "=== STEP 4: Terraform destroy ==="
-
-                    terraform destroy -auto-approve
-                    '''
-                }
+                sh 'terraform destroy -auto-approve'
             }
         }
     }
