@@ -12,7 +12,7 @@ variable "app_port" {
 
 variable "ecs_min_capacity" {
   description = "Minimum number of ECS tasks"
-  default     = 2
+  default     = 5
 }
 
 variable "ecs_max_capacity" {
