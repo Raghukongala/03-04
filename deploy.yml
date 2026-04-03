@@ -1,0 +1,232 @@
+# ══════════════════════════════════════════════════════════════════
+#  CI/CD Pipeline — ECS Fargate Deploy
+#  Trigger : push to main  →  build → push ECR → deploy ECS
+#  Infra   : terraform apply runs only on manual dispatch
+# ══════════════════════════════════════════════════════════════════
+
+name: Deploy to ECS
+
+on:
+  push:
+    branches:
+      - main          # app deploy on every merge to main
+  workflow_dispatch:  # manual trigger — used for terraform apply/destroy
+    inputs:
+      terraform_action:
+        description: "Terraform action to run"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none        # skip terraform, just deploy app
+          - plan        # show what terraform will change
+          - apply       # provision / update infrastructure
+          - destroy     # tear everything down
+
+# ──────────────────────────────────────────────
+# Shared env vars — edit these to match your setup
+# ──────────────────────────────────────────────
+env:
+  AWS_REGION        : ap-south-1
+  ECR_REPO_NAME     : ecs-devops-repo
+  ECS_CLUSTER       : devops-ecs-cluster
+  ECS_SERVICE       : devops-service
+  CONTAINER_NAME    : devops-container
+  TF_WORKING_DIR    : .               # root of repo = where *.tf files live
+
+# Cancel any in-progress run on the same branch
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ────────────────────────────────────────────
+  # JOB 1 — TERRAFORM  (runs only on workflow_dispatch
+  #          when terraform_action != 'none')
+  # ────────────────────────────────────────────
+  terraform:
+    name: "Terraform ${{ github.event.inputs.terraform_action }}"
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.terraform_action != 'none'
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id     : ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key : ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region            : ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out=tfplan -input=false
+        continue-on-error: ${{ github.event.inputs.terraform_action == 'destroy' }}
+
+      # Post plan output as PR comment (if triggered from a PR)
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan 📋
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Apply
+        if: github.event.inputs.terraform_action == 'apply'
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: github.event.inputs.terraform_action == 'destroy'
+        run: terraform destroy -auto-approve
+
+  # ────────────────────────────────────────────
+  # JOB 2 — BUILD & PUSH IMAGE TO ECR
+  # ────────────────────────────────────────────
+  build:
+    name: "Build & Push Docker Image"
+    runs-on: ubuntu-latest
+    # Skip build on terraform-only dispatches
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.terraform_action == 'none')
+
+    outputs:
+      image_tag : ${{ steps.meta.outputs.image_tag }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id     : ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key : ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region            : ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tag with both short SHA (immutable) and 'latest'
+      - name: Set image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "Image tag: ${SHORT_SHA}"
+
+      - name: Build Docker image
+        env:
+          REGISTRY  : ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG : ${{ steps.meta.outputs.image_tag }}
+        run: |
+          docker build \
+            --cache-from $REGISTRY/$ECR_REPO_NAME:latest \
+            --tag $REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG \
+            --tag $REGISTRY/$ECR_REPO_NAME:latest \
+            .
+
+      - name: Push image to ECR
+        env:
+          REGISTRY  : ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG : ${{ steps.meta.outputs.image_tag }}
+        run: |
+          docker push $REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
+          docker push $REGISTRY/$ECR_REPO_NAME:latest
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref : "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ steps.meta.outputs.image_tag }}"
+          format    : "table"
+          severity  : "CRITICAL,HIGH"
+          exit-code : "0"   # warn only — set to 1 to fail pipeline on findings
+
+  # ────────────────────────────────────────────
+  # JOB 3 — DEPLOY TO ECS
+  # ────────────────────────────────────────────
+  deploy:
+    name: "Deploy to ECS Fargate"
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production   # enables manual approval gate in GitHub
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id     : ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key : ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region            : ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Pull the existing task definition JSON from AWS so we
+      # don't need to maintain a copy in the repo
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition devops-task \
+            --query taskDefinition \
+            > task-definition.json
+
+      # Inject the new image URI into the downloaded task def
+      - name: Update image in task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition : task-definition.json
+          container-name  : ${{ env.CONTAINER_NAME }}
+          image           : "${{ needs.build.outputs.ecr_registry }}/${{ env.ECR_REPO_NAME }}:${{ needs.build.outputs.image_tag }}"
+
+      # Register the new task def revision and update the service
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition       : ${{ steps.task-def.outputs.task-definition }}
+          service               : ${{ env.ECS_SERVICE }}
+          cluster               : ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true   # blocks until new tasks are healthy
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Deployed image tag : ${{ needs.build.outputs.image_tag }}"
+          echo "   Cluster            : ${{ env.ECS_CLUSTER }}"
+          echo "   Service            : ${{ env.ECS_SERVICE }}"

@@ -12,3 +12,13 @@ output "ecs_cluster_name" {
   description = "Name of the ECS Cluster"
   value       = aws_ecs_cluster.cluster.name
 }
+
+output "ecs_autoscaling_min" {
+  description = "Minimum ECS task count"
+  value       = aws_appautoscaling_target.ecs_target.min_capacity
+}
+
+output "ecs_autoscaling_max" {
+  description = "Maximum ECS task count"
+  value       = aws_appautoscaling_target.ecs_target.max_capacity
+}

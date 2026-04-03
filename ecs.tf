@@ -60,9 +60,43 @@ resource "aws_ecs_task_definition" "task" {
 }
 
 # ─────────────────────────────────────────────
+# ECS Service  (wired to ALB target group)
+# Declared BEFORE ecs_sg so that on destroy,
+# Terraform tears down the service first (draining
+# all task ENIs), and only then deletes the SG.
+# ─────────────────────────────────────────────
+resource "aws_ecs_service" "service" {
+  name            = "devops-service"
+  cluster         = aws_ecs_cluster.cluster.id
+  task_definition = aws_ecs_task_definition.task.arn
+  desired_count   = var.ecs_min_capacity
+  launch_type     = "FARGATE"
+
+  timeouts {
+    delete = "20m"
+  }
+
+  network_configuration {
+    subnets          = [aws_subnet.public1.id, aws_subnet.public2.id]
+    security_groups  = [aws_security_group.ecs_sg.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.tg.arn
+    container_name   = "devops-container"
+    container_port   = var.app_port
+  }
+
+  depends_on = [aws_lb_listener.http]
+}
+
+# ─────────────────────────────────────────────
 # Security Group – ECS Tasks
-# Only accepts traffic from the ALB security group
-# (not open to 0.0.0.0/0 anymore)
+# Declared AFTER the service block so the Terraform
+# destroy graph deletes the service (and drains all
+# task ENIs) before attempting to delete this SG.
+# This is the fix for: DependencyViolation on destroy.
 # ─────────────────────────────────────────────
 resource "aws_security_group" "ecs_sg" {
   name        = "ecs-sg"
@@ -84,33 +118,9 @@ resource "aws_security_group" "ecs_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  depends_on = [aws_ecs_service.service]
+
   tags = {
     Name = "ecs-sg"
   }
-}
-
-# ─────────────────────────────────────────────
-# ECS Service  (wired to ALB target group)
-# ─────────────────────────────────────────────
-resource "aws_ecs_service" "service" {
-  name            = "devops-service"
-  cluster         = aws_ecs_cluster.cluster.id
-  task_definition = aws_ecs_task_definition.task.arn
-  desired_count   = 2 # 2 tasks across 2 AZs for HA
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = [aws_subnet.public1.id, aws_subnet.public2.id]
-    security_groups  = [aws_security_group.ecs_sg.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.tg.arn
-    container_name   = "devops-container"
-    container_port   = var.app_port
-  }
-
-  # Ensure ALB listener is created before the service
-  depends_on = [aws_lb_listener.http]
 }
