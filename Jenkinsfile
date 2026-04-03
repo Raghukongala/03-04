@@ -7,6 +7,8 @@ pipeline {
 
     environment {
         AWS_REGION = "ap-south-1"
+        CLUSTER_NAME = "devops-ecs-cluster"
+        SERVICE_NAME = "devops-service"
     }
 
     stages {
@@ -53,19 +55,30 @@ pipeline {
             }
             steps {
                 sh '''
-                echo "Stopping ECS service before destroy..."
+                echo "=== STEP 1: Scale down ECS service ==="
 
                 aws ecs update-service \
-                  --cluster devops-ecs-cluster \
-                  --service devops-service \
+                  --cluster $CLUSTER_NAME \
+                  --service $SERVICE_NAME \
                   --desired-count 0 || true
 
+                echo "Waiting for tasks to stop..."
                 sleep 60
 
+                echo "=== STEP 2: Delete ECS service ==="
+
                 aws ecs delete-service \
-                  --cluster devops-ecs-cluster \
-                  --service devops-service \
+                  --cluster $CLUSTER_NAME \
+                  --service $SERVICE_NAME \
                   --force || true
+
+                echo "Waiting for service to become inactive..."
+
+                aws ecs wait services-inactive \
+                  --cluster $CLUSTER_NAME \
+                  --services $SERVICE_NAME || true
+
+                echo "=== STEP 3: Terraform destroy ==="
 
                 terraform destroy -auto-approve
                 '''
