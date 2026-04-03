@@ -5,3 +5,7 @@ variable "project_name" {
 variable "vpc_cidr" {
   default = "10.0.0.0/16"
 }
+
+variable "app_port" {
+  default = 5000
+}
