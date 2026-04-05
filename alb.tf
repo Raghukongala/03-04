@@ -53,8 +53,9 @@ resource "aws_lb_target_group" "tg" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip" # required for Fargate (awsvpc mode)
 
-  health_check {
+health_check {
     path                = "/"
+    port                = tostring(var.app_port)    # ← add this line
     protocol            = "HTTP"
     matcher             = "200-399"
     interval            = 30
