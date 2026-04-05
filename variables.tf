@@ -7,7 +7,7 @@ variable "vpc_cidr" {
 }
 
 variable "app_port" {
-  default = 5000
+  default = 8079
 }
 
 variable "ecs_min_capacity" {
