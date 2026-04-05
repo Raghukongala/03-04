@@ -1,7 +1,13 @@
+#####################################
+# ECS CLUSTER
+#####################################
 resource "aws_ecs_cluster" "cluster" {
   name = "devops-ecs-cluster"
 }
 
+#####################################
+# IAM ROLE
+#####################################
 resource "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
 
@@ -24,6 +30,9 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+#####################################
+# TASK DEFINITION
+#####################################
 resource "aws_ecs_task_definition" "task" {
   family                   = "devops-task"
   requires_compatibilities = ["FARGATE"]
@@ -50,20 +59,69 @@ resource "aws_ecs_task_definition" "task" {
   ])
 }
 
-# ✅ Security Group FIRST (no depends_on)
+#####################################
+# UPDATED SECURITY GROUP (YOUR LOGIC)
+#####################################
 resource "aws_security_group" "ecs_sg" {
   name        = "ecs-sg"
-  description = "Allow traffic from ALB to ECS tasks"
+  description = "Allow traffic from ALB and internal services"
   vpc_id      = aws_vpc.main.id
 
+  # ✅ Front-end — only from ALB
   ingress {
-    description     = "App port from ALB"
+    description     = "Frontend app port from ALB"
     from_port       = var.app_port
     to_port         = var.app_port
     protocol        = "tcp"
     security_groups = [aws_security_group.alb_sg.id]
   }
 
+  # ✅ RabbitMQ AMQP
+  ingress {
+    description = "RabbitMQ AMQP"
+    from_port   = var.rabbitmq_amqp_port
+    to_port     = var.rabbitmq_amqp_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # ✅ RabbitMQ Management UI
+  ingress {
+    description = "RabbitMQ Management UI"
+    from_port   = var.rabbitmq_mgmt_port
+    to_port     = var.rabbitmq_mgmt_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # ✅ Queue Master
+  ingress {
+    description = "Queue Master"
+    from_port   = var.queue_master_port
+    to_port     = var.queue_master_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # ✅ Payment
+  ingress {
+    description = "Payment service"
+    from_port   = var.payment_port
+    to_port     = var.payment_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # ✅ Shipping
+  ingress {
+    description = "Shipping service"
+    from_port   = var.shipping_port
+    to_port     = var.shipping_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # ✅ Outbound
   egress {
     from_port   = 0
     to_port     = 0
@@ -76,7 +134,9 @@ resource "aws_security_group" "ecs_sg" {
   }
 }
 
-# ✅ ECS Service AFTER SG
+#####################################
+# ECS SERVICE
+#####################################
 resource "aws_ecs_service" "service" {
   name            = "devops-service"
   cluster         = aws_ecs_cluster.cluster.id
